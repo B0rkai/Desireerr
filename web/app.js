@@ -526,6 +526,13 @@ function picker(el, { kind, placeholder, values, chip = "inc", onChange }) {
 // over StashDB's scene query, with infinite scroll. Filters live in the URL.
 // ---------------------------------------------------------------------------------------
 
+// The collapsed filter panel's button, with how many filters are on.
+const filterSummary = (n) => html`<summary class="btn small ghost">${icon("settings")}Filters<span class="fcount" ${n ? "" : "hidden"}>${n}</span></summary>`;
+function setFilterCount(el, n) {
+  const c = $(".fcount", el);
+  if (c) { c.textContent = n; c.hidden = !n; }
+}
+
 const SORTS = [
   ["TRENDING:desc", "Trending"],
   ["DATE:desc", "Newest"],
@@ -559,10 +566,9 @@ async function sceneBrowser(el, ctx, { fixed = {}, defaults = {}, hide = [] } = 
   const named = (ids, kind) => ids.map((id) => ({ id, name: names[kind]?.[id] || id.slice(0, 8) }));
 
   const activeCount = () => [f.q, f.tags.length, f.not_tags.length, f.performers.length, f.studios.length, f.after, f.before, f.favorites, f.hide_have].filter(Boolean).length;
-  const wide = matchMedia("(min-width: 900px)").matches;
   el.innerHTML = html`
-    <details class="filters" ${wide || activeCount() ? "open" : ""}>
-      <summary class="btn small ghost" style="justify-self:start">Filters</summary>
+    <details class="filters">
+      ${filterSummary(activeCount())}
       <div class="filter-row">
         <label class="field grow"><span>Title</span><input class="input" id="f-q" type="search" placeholder="Words in the title" value="${f.q}"></label>
         <label class="field"><span>Sort</span><select class="input" id="f-sort">${SORTS.map(([v, l]) => html`<option value="${v}" ${v === `${f.sort}:${f.dir}` ? "selected" : ""}>${l}</option>`)}</select></label>
@@ -605,6 +611,7 @@ async function sceneBrowser(el, ctx, { fixed = {}, defaults = {}, hide = [] } = 
       after: f.after, before: f.before, favorites: f.favorites, hide_have: f.hide_have,
     }).replace("tags=-", "tags=");
     history.replaceState(null, "", url);
+    setFilterCount(el, activeCount());
     load(true);
   };
 
@@ -1093,7 +1100,9 @@ function listBrowser(el, ctx, { endpoint, key, card, gridClass, controls, defaul
   const params = new URLSearchParams(location.search);
   const f = { ...defaults };
   for (const k of Object.keys(defaults)) if (params.has(k)) f[k] = params.get(k);
-  el.innerHTML = html`<div class="filters"><div class="filter-row">${controls(f)}</div></div>
+  // Sorting isn't filtering: the button counts the rest that differ from the defaults.
+  const activeCount = () => Object.keys(defaults).filter((k) => !["sort", "dir"].includes(k) && f[k] !== defaults[k]).length;
+  el.innerHTML = html`<details class="filters">${filterSummary(activeCount())}<div class="filter-row">${controls(f)}</div></details>
     <div class="section-head"><h2 id="l-count" style="font-size:15px;color:var(--muted);font-weight:500"></h2></div>
     <div class="grid ${gridClass}" id="l-grid"></div><div class="load-more" id="l-more"></div>`.s;
   const grid = $("#l-grid", el), more = $("#l-more", el), countEl = $("#l-count", el);
@@ -1101,6 +1110,7 @@ function listBrowser(el, ctx, { endpoint, key, card, gridClass, controls, defaul
   const sync = () => {
     const changed = Object.fromEntries(Object.entries(f).filter(([k, v]) => v !== defaults[k]));
     history.replaceState(null, "", location.pathname + qs(changed));
+    setFilterCount(el, activeCount());
     load(true);
   };
   async function load(reset) {
@@ -1142,11 +1152,11 @@ async function viewPerformers(view, ctx) {
   view.innerHTML = html`<div class="page"><div class="page-title"><h1>Performers</h1></div><div class="section" id="list"></div></div>`.s;
   await listBrowser($("#list", view), ctx, {
     endpoint: "performers", key: "performers", card: personCard, gridClass: "people",
-    defaults: { q: "", sort: "POPULARITY", gender: "", favorites: "" },
+    defaults: { q: "", sort: "POPULARITY", gender: "FEMALE", favorites: "" },
     controls: (f) => html`
       <label class="field grow"><span>Name</span><input class="input" type="search" name="q" value="${f.q}" placeholder="Name or alias"></label>
       <label class="field"><span>Sort</span><select class="input" name="sort">${[["POPULARITY", "Most popular"], ["SCENE_COUNT", "Most scenes"], ["LAST_SCENE", "Latest scene"], ["DEBUT", "Newest debut"], ["CREATED_AT", "Newly added to StashDB"], ["NAME", "Name"]].map(([v, l]) => option(v, l, f.sort))}</select></label>
-      <label class="field"><span>Gender</span><select class="input" name="gender">${[["", "Any"], ["FEMALE", "Female"], ["MALE", "Male"], ["TRANSGENDER_FEMALE", "Trans female"], ["TRANSGENDER_MALE", "Trans male"], ["NON_BINARY", "Non-binary"], ["INTERSEX", "Intersex"]].map(([v, l]) => option(v, l, f.gender))}</select></label>
+      <label class="field"><span>Gender</span><select class="input" name="gender">${[["ANY", "Any"], ["FEMALE", "Female"], ["MALE", "Male"], ["TRANSGENDER_FEMALE", "Trans female"], ["TRANSGENDER_MALE", "Trans male"], ["NON_BINARY", "Non-binary"], ["INTERSEX", "Intersex"]].map(([v, l]) => option(v, l, f.gender))}</select></label>
       <label class="check" style="align-self:end;height:38px"><input type="checkbox" name="favorites" ${f.favorites ? "checked" : ""}> StashDB favourites only</label>`,
   });
 }

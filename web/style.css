@@ -213,6 +213,10 @@ button.chip { cursor: pointer; }
 /* ---------- filters ---------- */
 .filters { display: grid; gap: 12px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; }
 .filter-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.filters > summary { justify-self: start; list-style: none; }
+.filters > summary::-webkit-details-marker { display: none; }
+.filters:not([open]) { background: none; border-color: transparent; padding: 0; }
+.fcount { min-width: 20px; height: 20px; padding: 0 6px; border-radius: 99px; background: var(--accent); color: #fff; font-size: 12px; display: inline-grid; place-items: center; font-variant-numeric: tabular-nums; }
 .field { display: grid; gap: 4px; min-width: 0; }
 .field > span { font-size: 12px; color: var(--muted); font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
 .input, select.input { height: 38px; border-radius: 9px; border: 1px solid var(--line); background: var(--bg-2); padding: 0 12px; outline: none; min-width: 0; }
