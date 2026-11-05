@@ -13,6 +13,7 @@ browser only talks to Desireerr and nothing loads before you sign in.
 
 import argparse
 import base64
+import contextlib
 import hashlib
 import hmac
 import json
@@ -29,6 +30,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -49,6 +51,7 @@ QUEUE_MAX_AGE = 15
 IMAGE_HOSTS = re.compile(r"^(?:[a-z0-9-]+\.)*stashdb\.org$")
 IMAGE_CACHE_BYTES = 2 * 1024**3
 PER_PAGE_MAX = 100
+SLOW_REQUEST = 0.5           # seconds; slower API requests are logged with where the time went
 
 DEFAULT_SETTINGS = {
     "stashdb_key": "",
@@ -76,6 +79,64 @@ class ApiError(Exception):
         super().__init__(message)
         self.status = status
         self.message = message
+
+
+# ---------------------------------------------------------------------------------------
+# Timing: where a request's time goes
+# ---------------------------------------------------------------------------------------
+
+class Timing:
+    """Time a request spent waiting for StashDB, Whisparr and images, with how many calls.
+
+    One per request, found through a thread-local; threads working for the request (like
+    Discover's rows) are given the same one."""
+
+    local = threading.local()
+
+    def __init__(self):
+        self.start = time.monotonic()
+        self.lock = threading.Lock()
+        self.spent = {}  # name -> [seconds, calls]
+
+    @classmethod
+    def begin(cls, timing=None):
+        cls.local.timing = timing or Timing()
+        return cls.local.timing
+
+    @classmethod
+    def current(cls):
+        return getattr(cls.local, "timing", None)
+
+    def add(self, name, seconds):
+        with self.lock:
+            spent = self.spent.setdefault(name, [0.0, 0])
+            spent[0] += seconds
+            spent[1] += 1
+
+    def total(self):
+        return time.monotonic() - self.start
+
+    def summary(self):
+        with self.lock:
+            return ", ".join(f"{name} {sec:.2f}s in {calls}" for name, (sec, calls) in self.spent.items())
+
+    def header(self):
+        """For the browser's developer tools (Network, Timing)."""
+        with self.lock:
+            parts = [f'{name};dur={sec * 1000:.0f};desc="{calls} calls"'
+                     for name, (sec, calls) in self.spent.items()]
+        return ", ".join(parts + [f"total;dur={self.total() * 1000:.0f}"])
+
+
+@contextlib.contextmanager
+def timed(name):
+    t0 = time.monotonic()
+    try:
+        yield
+    finally:
+        timing = Timing.current()
+        if timing:
+            timing.add(name, time.monotonic() - t0)
 
 
 # ---------------------------------------------------------------------------------------
@@ -249,7 +310,7 @@ class StashDB:
         req = urllib.request.Request(STASHDB_URL, data=body, method="POST", headers={
             "Content-Type": "application/json", "ApiKey": key, "User-Agent": USER_AGENT})
         try:
-            with urllib.request.urlopen(req, timeout=25) as resp:
+            with timed("stashdb"), urllib.request.urlopen(req, timeout=25) as resp:
                 payload = json.load(resp)
         except urllib.error.HTTPError as e:
             if e.code in (401, 403):
@@ -421,7 +482,7 @@ class Whisparr:
         req = urllib.request.Request(full, data=data, method=method, headers={
             "X-Api-Key": key, "Content-Type": "application/json", "User-Agent": USER_AGENT})
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with timed("whisparr"), urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read()
         except urllib.error.HTTPError as e:
             detail = ""
@@ -639,7 +700,7 @@ class Images:
             return path.read_bytes(), meta.read_text()
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with timed("image"), urllib.request.urlopen(req, timeout=30) as resp:
                 ctype = resp.headers.get("Content-Type", "image/jpeg").split(";")[0]
                 data = resp.read(25 * 1024 * 1024)
         except urllib.error.HTTPError as e:
@@ -976,29 +1037,38 @@ class App:
         return out
 
     def discover(self, user):
-        rows = []
+        specs = [
+            ("trending", "Trending", lambda: self.stash.query_scenes(
+                {"page": 1, "per_page": 20, "sort": "TRENDING", "direction": "DESC"})["scenes"],
+             "/scenes?sort=TRENDING"),
+            ("favorites", "New from your StashDB favourites", lambda: self.stash.query_scenes(
+                {"page": 1, "per_page": 20, "sort": "DATE", "direction": "DESC", "favorites": "ALL",
+                 "date": {"value": tomorrow(), "modifier": "LESS_THAN"}})["scenes"],
+             "/scenes?favorites=ALL"),
+            ("added", "Recently added", self.recent_library, None),
+            ("new", "New releases", lambda: self.stash.query_scenes(
+                {"page": 1, "per_page": 20, "sort": "DATE", "direction": "DESC",
+                 "date": {"value": tomorrow(), "modifier": "LESS_THAN"}})["scenes"],
+             "/scenes?sort=DATE"),
+            ("popular", "Popular", lambda: self.stash.query_scenes(
+                {"page": 1, "per_page": 20, "sort": "POPULARITY", "direction": "DESC"})["scenes"],
+             "/scenes?sort=POPULARITY"),
+        ]
+        timing = Timing.current()
 
-        def row(key, title, fn, link=None):
+        def row(spec):
+            key, title, fn, link = spec
+            Timing.begin(timing)  # this thread works for the same request
             try:
-                rows.append({"key": key, "title": title, "link": link, "scenes": self.annotate(fn())})
+                return {"key": key, "title": title, "link": link, "scenes": self.annotate(fn())}
             except ApiError as e:
-                rows.append({"key": key, "title": title, "link": link, "scenes": [], "error": e.message})
+                return {"key": key, "title": title, "link": link, "scenes": [], "error": e.message}
 
-        row("trending", "Trending", lambda: self.stash.query_scenes(
-            {"page": 1, "per_page": 20, "sort": "TRENDING", "direction": "DESC"})["scenes"],
-            "/scenes?sort=TRENDING")
-        row("favorites", "New from your StashDB favourites", lambda: self.stash.query_scenes(
-            {"page": 1, "per_page": 20, "sort": "DATE", "direction": "DESC", "favorites": "ALL",
-             "date": {"value": tomorrow(), "modifier": "LESS_THAN"}})["scenes"],
-            "/scenes?favorites=ALL")
-        row("added", "Recently added", lambda: self.recent_library(), None)
-        row("new", "New releases", lambda: self.stash.query_scenes(
-            {"page": 1, "per_page": 20, "sort": "DATE", "direction": "DESC",
-             "date": {"value": tomorrow(), "modifier": "LESS_THAN"}})["scenes"],
-            "/scenes?sort=DATE")
-        row("popular", "Popular", lambda: self.stash.query_scenes(
-            {"page": 1, "per_page": 20, "sort": "POPULARITY", "direction": "DESC"})["scenes"],
-            "/scenes?sort=POPULARITY")
+        # The rows wait on StashDB, not on us: ask for all of them at once. Whisparr's
+        # state is brought up to date first, so the rows don't each refresh it.
+        self.whisparr.ensure_fresh()
+        with ThreadPoolExecutor(len(specs)) as pool:
+            rows = list(pool.map(row, specs))
         mine = self.db.all("SELECT * FROM requests WHERE user_id = ? ORDER BY id DESC LIMIT 12",
                            (user["id"],))
         for r in mine:
@@ -1210,6 +1280,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Frame-Options", "DENY")
+        timing = Timing.current()
+        if timing:
+            self.send_header("Server-Timing", timing.header())
         for k, v in (headers or {}).items():
             self.send_header(k, v)
         self.end_headers()
@@ -1256,6 +1329,7 @@ class Handler(BaseHTTPRequestHandler):
         self.dispatch("DELETE")
 
     def dispatch(self, method):
+        timing = Timing.begin()
         url = urllib.parse.urlsplit(self.path)
         path = url.path
         query = {k: v[-1] for k, v in urllib.parse.parse_qs(url.query).items()}
@@ -1279,6 +1353,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.send(500, {"error": "Something went wrong on the server. The log has details."})
             except OSError:
                 pass
+        finally:
+            # Only the path: queries can hold search terms.
+            if path.startswith("/api/") and timing.total() > SLOW_REQUEST:
+                print(f"slow: {method} {path} {timing.total():.2f}s"
+                      f" ({timing.summary() or 'all in Desireerr'})", flush=True)
 
     def static(self, path):
         if path in ("/favicon.ico",):
