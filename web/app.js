@@ -71,8 +71,13 @@ function toast(msg, bad = false) {
 }
 
 // StashDB scales its images with ?size=N (the longer side), so cards fetch small copies and
-// only the hero and the photo viewer the full image.
-const imgUrl = (u, size) => "/img?u=" + encodeURIComponent(size && !u.includes("?") ? `${u}?size=${size}` : u);
+// only the photo viewer the full image. It only knows these sizes: any other number gets the
+// full image, so a wanted size is rounded up to one of them.
+const IMAGE_SIZES = [300, 600, 1280];
+const imgUrl = (u, size) => {
+  const n = size && IMAGE_SIZES.find((s) => s >= size);
+  return "/img?u=" + encodeURIComponent(n && !u.includes("?") ? `${u}?size=${n}` : u);
+};
 // Should an image not come in a smaller size, ask for the full one.
 document.addEventListener("error", (e) => {
   const el = e.target;
@@ -349,7 +354,7 @@ function sceneCard(s) {
   const meta = [s.studio?.name, fmtDate(s.release_date)].filter(Boolean).join(" · ");
   return html`<a class="card scene-card" href="/scene/${s.id}" data-scene="${s.id}">
     <div class="thumb">
-      ${im ? html`<img src="${imgUrl(im, 640)}" alt="" loading="lazy" decoding="async">` : noImg()}
+      ${im ? html`<img src="${imgUrl(im, 600)}" alt="" loading="lazy" decoding="async">` : noImg()}
       <div class="shade"></div>
       ${s.duration ? html`<span class="dur">${fmtDur(s.duration)}</span>` : ""}
       <div class="quick">${sceneQuick(s)}</div>
