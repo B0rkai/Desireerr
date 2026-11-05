@@ -4,6 +4,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import unittest.mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -251,6 +252,85 @@ class Follow(unittest.TestCase):
         self.app.whisparr.routes[("PUT", "performer/3")] = lambda b, p: put.append(b) or b
         self.app.whisparr.set_follow("performer", SCENE, True)
         self.assertEqual((put[0]["afterDate"], put[0]["monitored"]), ("2026-10-30", True))
+
+
+class Init(unittest.TestCase):
+    """desireerr.py init: the admin from a shared login, the StashDB key from Whisparr."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.data = Path(self.tmp.name) / "data"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_init(self, user="alice", password="pw", key=""):
+        app = d.App(self.data, None, setup_code=False)
+        return app, d.init(app, user, password, key)
+
+    def users(self, app):
+        return [(u["username"], u["is_admin"]) for u in app.users()]
+
+    def test_creates_the_admin_once(self):
+        app, done = self.run_init(key="KEY1")
+        self.assertEqual(done, ["created the admin 'alice'", "StashDB key: set"])
+        self.assertEqual(self.users(app), [("alice", 1)])
+        self.assertEqual(app.db.setting("stashdb_key"), "KEY1")
+        app, done = self.run_init(key="KEY1")
+        self.assertEqual(done, ["admin 'alice': up to date", "StashDB key: up to date"])
+        self.assertEqual(self.users(app), [("alice", 1)])
+
+    def test_short_shared_passwords_are_fine(self):
+        app, _ = self.run_init(password="abc")
+        user = app.db.one("SELECT * FROM users")
+        self.assertTrue(d.check_password("abc", user["pw_salt"], user["pw_hash"]))
+
+    def test_admin_follows_a_changed_login(self):
+        self.run_init()
+        app, done = self.run_init(password="new")
+        self.assertEqual(done[0], "admin login updated (user 'alice')")
+        app, done = self.run_init(user="bob", password="new2")
+        self.assertEqual(self.users(app), [("bob", 1)])
+        user = app.db.one("SELECT * FROM users")
+        self.assertTrue(d.check_password("new2", user["pw_salt"], user["pw_hash"]))
+
+    def test_an_admin_made_by_hand_is_left_alone(self):
+        app = d.App(self.data, None, setup_code=False)
+        app.create_user("carol", "handmade1", is_admin=True)
+        app, done = self.run_init()
+        self.assertEqual(done[0], "has its own admin, made on its first visit; not changing it")
+        self.assertEqual(self.users(app), [("carol", 1)])
+
+    def test_same_login_made_by_hand_is_adopted(self):
+        app = d.App(self.data, None, setup_code=False)
+        app.create_user("alice", "pw-by-hand", is_admin=True)
+        _, done = self.run_init(password="pw-by-hand")
+        self.assertEqual(done[0], "admin 'alice': up to date")
+        _, done = self.run_init(password="changed")
+        self.assertEqual(done[0], "admin login updated (user 'alice')")
+
+    def test_a_key_set_in_settings_wins(self):
+        app, _ = self.run_init(key="FROM-WHISPARR")
+        app.db.set_settings({"stashdb_key": "MINE"})
+        app, done = self.run_init(key="FROM-WHISPARR")
+        self.assertEqual(done[1], "StashDB key: keeps the one set in Desireerr")
+        self.assertEqual(app.db.setting("stashdb_key"), "MINE")
+
+    def test_removes_the_setup_code(self):
+        app = d.App(self.data, None)
+        self.assertTrue((self.data / "setup-code").exists())
+        self.run_init()
+        self.assertFalse((self.data / "setup-code").exists())
+
+    def test_command_reads_the_environment(self):
+        env = {"DESIREERR_ADMIN_USER": "alice", "DESIREERR_ADMIN_PASSWORD": "pw",
+               "DESIREERR_STASHDB_KEY": ""}
+        with unittest.mock.patch.dict(d.os.environ, env):
+            with unittest.mock.patch("sys.stdout") as out:
+                self.assertEqual(d.cmd_init(["--data", str(self.data)]), 0)
+        printed = "".join(c.args[0] for c in out.write.call_args_list)
+        self.assertIn("created the admin 'alice'", printed)
+        self.assertIn("no StashDB key yet", printed)
 
 
 class Images(unittest.TestCase):

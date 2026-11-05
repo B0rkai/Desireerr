@@ -42,6 +42,17 @@ cat ~/.local/state/desireerr/setup-code
 Then create the admin and paste your StashDB API key (stashdb.org → your profile → API
 key). It can also be added later under Settings.
 
+To skip that page (torrent-box's setup does this), give the admin login and the key through
+the environment, never the command line:
+
+```sh
+DESIREERR_ADMIN_USER=alice DESIREERR_ADMIN_PASSWORD=... DESIREERR_STASHDB_KEY=... \
+    python3 ~/desireerr/desireerr.py init
+```
+
+Run again with a new password, it updates that admin. An admin made on the first-visit page
+and a key changed in Settings are left alone.
+
 If ufw is on, open the port to the LAN (and the tailnet, if you use Tailscale):
 
 ```sh

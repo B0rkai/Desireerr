@@ -689,15 +689,15 @@ def id_list(value):
 
 
 class App:
-    def __init__(self, data_dir, cache_dir):
+    def __init__(self, data_dir, cache_dir, setup_code=True):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.db = DB(self.data_dir / "desireerr.db")
         self.stash = StashDB(lambda: self.db.setting("stashdb_key") or self.file_key())
         self.whisparr = Whisparr(self.db)
-        self.images = Images(cache_dir)
+        self.images = Images(cache_dir) if cache_dir else None
         self.failures = {}       # ip -> (count, last time), for login throttling
-        self.setup_code = self.load_setup_code()
+        self.setup_code = self.load_setup_code() if setup_code else ""
 
     def load_setup_code(self):
         """Until the admin exists, setup asks for a code only someone on the server can read,
@@ -766,12 +766,12 @@ class App:
         return self.new_session(user["id"])
 
     # -- users --------------------------------------------------------------------------
-    def create_user(self, username, password, is_admin=False, auto_approve=False):
+    def create_user(self, username, password, is_admin=False, auto_approve=False, min_password=8):
         username = (username or "").strip()
-        if not re.fullmatch(r"[A-Za-z0-9_.@-]{2,40}", username):
-            raise ApiError(400, "Usernames are 2 to 40 letters, digits or . _ @ -")
-        if len(password or "") < 8:
-            raise ApiError(400, "Passwords need at least 8 characters.")
+        if not re.fullmatch(r"[^\s:]{1,64}", username):
+            raise ApiError(400, "Usernames are up to 64 characters, without spaces or colons.")
+        if len(password or "") < max(1, min_password):
+            raise ApiError(400, f"Passwords need at least {min_password} characters.")
         if self.db.one("SELECT id FROM users WHERE username = ?", (username,)):
             raise ApiError(409, f"There is already a user called {username}.")
         salt, digest = hash_password(password)
@@ -779,9 +779,9 @@ class App:
             "INSERT INTO users(username, pw_salt, pw_hash, is_admin, auto_approve, created) "
             "VALUES (?,?,?,?,?,?)", (username, salt, digest, int(is_admin), int(auto_approve), now()))
 
-    def set_password(self, user_id, password):
-        if len(password or "") < 8:
-            raise ApiError(400, "Passwords need at least 8 characters.")
+    def set_password(self, user_id, password, min_password=8):
+        if len(password or "") < max(1, min_password):
+            raise ApiError(400, f"Passwords need at least {min_password} characters.")
         salt, digest = hash_password(password)
         self.db.run("UPDATE users SET pw_salt = ?, pw_hash = ? WHERE id = ?", (salt, digest, user_id))
         self.db.run("DELETE FROM sessions WHERE user_id = ?", (user_id,))
@@ -1482,7 +1482,87 @@ def refresher(app):
         time.sleep(INDEX_MAX_AGE)
 
 
+def init(app, user="", password="", stashdb_key=""):
+    """Set up the admin and the StashDB key from outside, e.g. from torrent-box's setup.
+
+    The admin gets a login shared with other apps; a salted hash of it is kept, so a later
+    run can tell whether that login changed (then the admin follows it) without storing it.
+    An admin made on the first visit and a key set in Settings are never overwritten.
+    Returns what was done, one line each.
+    """
+    db, done = app.db, []
+
+    def remember():
+        salt, digest = hash_password(f"{user}:{password}")
+        db.set_settings({"managed_login": json.dumps({"user": user, "salt": salt, "hash": digest})})
+
+    if user and password:
+        managed = json.loads(db.setting("managed_login") or "null")
+        own = db.one("SELECT * FROM users WHERE username = ?", (user,))
+        if app.setup_needed():
+            app.create_user(user, password, is_admin=True, auto_approve=True, min_password=1)
+            remember()
+            done.append(f"created the admin '{user}'")
+        elif managed and managed["user"] == user and check_password(
+                f"{user}:{password}", managed["salt"], managed["hash"]):
+            done.append(f"admin '{user}': up to date")
+        elif managed:
+            # The shared login changed since the last run: the admin follows it.
+            admin = db.one("SELECT * FROM users WHERE username = ?", (managed["user"],))
+            if not admin:
+                done.append(f"its admin '{managed['user']}' was deleted in Desireerr; not making it again")
+            elif own and own["id"] != admin["id"]:
+                done.append(f"can't rename its admin to '{user}': there's another user by that name")
+            else:
+                db.run("UPDATE users SET username = ?, is_admin = 1 WHERE id = ?", (user, admin["id"]))
+                app.set_password(admin["id"], password, min_password=1)
+                remember()
+                done.append(f"admin login updated (user '{user}')")
+        elif own and check_password(password, own["pw_salt"], own["pw_hash"]):
+            db.run("UPDATE users SET is_admin = 1 WHERE id = ?", (own["id"],))
+            remember()
+            done.append(f"admin '{user}': up to date")
+        else:
+            done.append("has its own admin, made on its first visit; not changing it")
+    saved = db.setting("stashdb_key")
+    if stashdb_key and not saved:
+        db.set_settings({"stashdb_key": stashdb_key})
+        done.append("StashDB key: set")
+    elif stashdb_key and saved != stashdb_key:
+        done.append("StashDB key: keeps the one set in Desireerr")
+    elif saved:
+        done.append("StashDB key: up to date")
+    else:
+        done.append("no StashDB key yet: add it in Desireerr's Settings")
+    if not app.setup_needed():
+        (app.data_dir / "setup-code").unlink(missing_ok=True)
+    return done
+
+
+def cmd_init(argv):
+    p = argparse.ArgumentParser(prog="desireerr.py init", description=(
+        "Set up the admin and the StashDB key without the first-visit page. The secrets come "
+        "from the environment: DESIREERR_ADMIN_USER, DESIREERR_ADMIN_PASSWORD, "
+        "DESIREERR_STASHDB_KEY (each optional)."))
+    p.add_argument("--data", default=os.environ.get(
+        "DESIREERR_DATA", Path.home() / ".local/state/desireerr"))
+    args = p.parse_args(argv)
+    app = App(args.data, None, setup_code=False)
+    try:
+        done = init(app, os.environ.get("DESIREERR_ADMIN_USER", "").strip(),
+                    os.environ.get("DESIREERR_ADMIN_PASSWORD", ""),
+                    os.environ.get("DESIREERR_STASHDB_KEY", "").strip())
+    except ApiError as e:
+        print(f"desireerr init: {e.message}", file=sys.stderr)
+        return 1
+    print("\n".join(done))
+    return 0
+
+
 def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["init"]:
+        sys.exit(cmd_init(argv[1:]))
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--port", type=int, default=int(os.environ.get("DESIREERR_PORT", 5056)))
     p.add_argument("--bind", default=os.environ.get("DESIREERR_BIND", "::"))
