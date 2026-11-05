@@ -1,0 +1,343 @@
+import http.client
+import json
+import sys
+import tempfile
+import threading
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import desireerr as d  # noqa: E402
+
+
+class FakeWhisparr(d.Whisparr):
+    """Whisparr's API as a dict of (method, path) -> handler; records every call."""
+
+    def __init__(self, db, routes):
+        super().__init__(db)
+        self.routes = routes
+        self.calls = []
+
+    def creds(self):
+        return "http://whisparr", "KEY"
+
+    def call(self, method, path, body=None, params=None, timeout=30):
+        self.calls.append((method, path, body, params))
+        handler = self.routes.get((method, path))
+        if handler is None:
+            raise d.ApiError(502, f"unexpected {method} {path}")
+        return handler(body, params) if callable(handler) else handler
+
+
+class FakeStash:
+    def __init__(self, scenes):
+        self.scenes = scenes
+
+    def find_scene(self, sid):
+        return self.scenes.get(sid)
+
+
+SCENE = "11111111-2222-3333-4444-555555555555"
+OTHER = "99999999-8888-7777-6666-555555555555"
+
+
+def scene(sid=SCENE):
+    return {"id": sid, "title": "A scene", "release_date": "2026-11-01",
+            "studio": {"id": "s1", "name": "Studio"},
+            "images": [{"url": "https://cdn.stashdb.org/a", "width": 1280, "height": 720},
+                       {"url": "https://cdn.stashdb.org/b", "width": 600, "height": 900}]}
+
+
+def make_app(tmp, routes=None):
+    app = d.App(Path(tmp) / "data", Path(tmp) / "cache")
+    app.whisparr = FakeWhisparr(app.db, routes or {})
+    app.whisparr.index_time = app.whisparr.queue_time = 9e18  # never refresh on its own
+    app.stash = FakeStash({SCENE: scene(), OTHER: scene(OTHER)})
+    return app
+
+
+class Passwords(unittest.TestCase):
+    def test_round_trip(self):
+        salt, digest = d.hash_password("correct horse")
+        self.assertTrue(d.check_password("correct horse", salt, digest))
+        self.assertFalse(d.check_password("wrong horse", salt, digest))
+
+    def test_salted(self):
+        self.assertNotEqual(d.hash_password("same")[1], d.hash_password("same")[1])
+
+
+class SceneQuery(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.app = make_app(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_defaults(self):
+        inp = self.app.scene_input({})
+        self.assertEqual(inp, {"page": 1, "per_page": 40, "sort": "DATE", "direction": "DESC"})
+
+    def test_tags_all_and_any(self):
+        inp = self.app.scene_input({"tags": f"{SCENE},{OTHER}"})
+        self.assertEqual(inp["tags"], {"value": [SCENE, OTHER], "modifier": "INCLUDES_ALL"})
+        inp = self.app.scene_input({"tags": SCENE, "tag_mode": "any"})
+        self.assertEqual(inp["tags"]["modifier"], "INCLUDES")
+
+    def test_excluded_tags_alone_go_to_stashdb(self):
+        inp = self.app.scene_input({"not_tags": SCENE})
+        self.assertEqual(inp["tags"], {"value": [SCENE], "modifier": "EXCLUDES"})
+
+    def test_included_tags_win_the_one_criterion(self):
+        inp = self.app.scene_input({"tags": SCENE, "not_tags": OTHER})
+        self.assertEqual(inp["tags"], {"value": [SCENE], "modifier": "INCLUDES_ALL"})
+
+    def test_bad_ids_and_values_are_dropped(self):
+        inp = self.app.scene_input({"tags": "x\" } evil,", "sort": "DROP", "per_page": "9999",
+                                    "after": "yesterday", "favorites": "NOPE"})
+        self.assertNotIn("tags", inp)
+        self.assertEqual(inp["sort"], "DATE")
+        self.assertEqual(inp["per_page"], d.PER_PAGE_MAX)
+        self.assertNotIn("date", inp)
+        self.assertNotIn("favorites", inp)
+
+    def test_one_studio_with_sub_studios(self):
+        self.assertEqual(self.app.scene_input({"studios": SCENE, "sub_studios": "1"})["parentStudio"], SCENE)
+        self.assertEqual(self.app.scene_input({"studios": SCENE})["studios"],
+                         {"value": [SCENE], "modifier": "INCLUDES"})
+
+    def test_dates(self):
+        self.assertEqual(self.app.scene_input({"after": "2026-01-01"})["date"],
+                         {"value": "2026-01-01", "modifier": "GREATER_THAN"})
+
+    def test_find_many_ignores_odd_ids(self):
+        stash = d.StashDB(lambda: "KEY")
+        seen = []
+        stash.query = lambda q, v=None, ttl=300, key=None: seen.append(q) or {"a0": {"id": SCENE, "name": "x"}}
+        self.assertEqual(stash.names("tags", [SCENE, '") { evil }']), {SCENE: "x"})
+        self.assertEqual(seen[0].count("findTag("), 1)
+
+
+class States(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.app = make_app(self.tmp.name)
+        self.w = self.app.whisparr
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def entry(self, **kw):
+        base = {"id": 7, "monitored": False, "has_file": False, "file_added": "", "item_type": "scene"}
+        base.update(kw)
+        self.w.index[SCENE] = base
+
+    def test_not_in_whisparr(self):
+        self.assertEqual(self.app.state(SCENE)["status"], "none")
+
+    def test_unmonitored_is_not_requested(self):
+        self.entry()
+        self.assertEqual(self.app.state(SCENE)["status"], "none")
+
+    def test_order(self):
+        self.entry(monitored=True)
+        self.assertEqual(self.app.state(SCENE)["status"], "processing")
+        self.w.queue[7] = {"progress": 40, "status": "downloading", "timeleft": "00:10:00"}
+        st = self.app.state(SCENE)
+        self.assertEqual((st["status"], st["progress"]), ("downloading", 40))
+        self.entry(monitored=True, has_file=True)
+        self.assertEqual(self.app.state(SCENE)["status"], "available")
+
+    def test_own_requests(self):
+        self.assertEqual(self.app.state(SCENE, {"id": 1, "status": "pending"})["status"], "pending")
+        self.assertEqual(self.app.state(SCENE, {"id": 1, "status": "declined"})["status"], "declined")
+
+
+class Requests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.added = []
+        routes = {
+            ("GET", "movie"): [],
+            ("GET", "lookup/scene"): lambda b, p: [{"foreignId": p["term"][6:], "movie": {
+                "title": "A scene", "foreignId": p["term"][6:], "itemType": "scene", "id": 0}}],
+            ("POST", "movie"): lambda b, p: self.added.append(b) or {"id": 42},
+            ("GET", "qualityprofile"): [{"id": 1, "name": "Any"}, {"id": 4, "name": "HD"}],
+            ("GET", "rootfolder"): [{"path": "/x/HD"}, {"path": "/x/SD"}],
+            ("GET", "studio"): [{"qualityProfileId": 4}, {"qualityProfileId": 4}, {"qualityProfileId": 1}],
+        }
+        self.app = make_app(self.tmp.name, routes)
+        self.admin = self.app.db.one("SELECT * FROM users WHERE id = ?",
+                                     (self.app.create_user("boss", "password1", is_admin=True),))
+        self.user = self.app.db.one("SELECT * FROM users WHERE id = ?",
+                                    (self.app.create_user("guest", "password1"),))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_user_request_waits_for_approval(self):
+        r = self.app.request_scene(self.user, SCENE)
+        self.assertEqual((r["status"], r["state"]["status"]), ("pending", "pending"))
+        self.assertEqual(self.added, [])
+        with self.assertRaises(d.ApiError):
+            self.app.request_scene(self.user, SCENE)
+
+    def test_admin_request_adds_and_searches(self):
+        r = self.app.request_scene(self.admin, SCENE)
+        self.assertEqual((r["status"], r["whisparr_id"], r["state"]["status"]), ("approved", 42, "processing"))
+        movie = self.added[0]
+        self.assertNotIn("id", movie)
+        self.assertEqual((movie["qualityProfileId"], movie["rootFolderPath"], movie["monitored"]), (4, "/x/HD", True))
+        self.assertEqual(movie["addOptions"]["searchForMovie"], True)
+
+    def test_existing_unmonitored_scene_is_monitored_and_searched(self):
+        put = []
+        self.app.whisparr.routes.update({
+            ("GET", "movie"): [{"id": 5, "stashId": SCENE}],
+            ("GET", "movie/5"): {"id": 5, "stashId": SCENE, "monitored": False, "hasFile": False},
+            ("PUT", "movie/5"): lambda b, p: put.append(b) or b,
+            ("POST", "command"): lambda b, p: put.append(b) or {},
+        })
+        self.app.request_scene(self.admin, SCENE)
+        self.assertTrue(put[0]["monitored"])
+        self.assertEqual(put[1], {"name": "MoviesSearch", "movieIds": [5]})
+
+    def test_failed_send_is_kept_with_its_reason(self):
+        self.app.whisparr.routes[("GET", "lookup/scene")] = []
+        with self.assertRaises(d.ApiError):
+            self.app.request_scene(self.admin, SCENE)
+        row = self.app.db.one("SELECT * FROM requests")
+        self.assertEqual(row["status"], "failed")
+        self.assertIn("couldn't find", row["error"])
+
+    def test_approve_and_decline(self):
+        r = self.app.request_scene(self.user, SCENE)
+        self.assertEqual(self.app.approve(self.admin, r["id"])["status"], "approved")
+        r2 = self.app.request_scene(self.user, OTHER)
+        self.assertEqual(self.app.decline(self.admin, r2["id"])["status"], "declined")
+
+    def test_users_see_only_their_requests(self):
+        self.app.request_scene(self.user, SCENE)
+        self.app.request_scene(self.admin, OTHER)
+        self.assertEqual(self.app.list_requests(self.user, "all", 1)["count"], 1)
+        self.assertEqual(self.app.list_requests(self.admin, "all", 1)["count"], 2)
+
+
+class Follow(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.sent = []
+        self.app = make_app(self.tmp.name, {
+            ("GET", "performer"): lambda b, p: [],
+            ("GET", "lookup/performer"): [{"foreignId": SCENE, "performer": {"foreignId": SCENE, "name": "P", "id": 0}}],
+            ("POST", "performer"): lambda b, p: self.sent.append(b) or b,
+            ("GET", "qualityprofile"): [{"id": 1, "name": "Any"}],
+            ("GET", "rootfolder"): [{"path": "/x/HD"}],
+            ("GET", "studio"): [],
+        })
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_follow_sets_after_date_to_today(self):
+        self.app.whisparr.set_follow("performer", SCENE, True)
+        self.assertEqual(self.sent[0]["afterDate"], d.today())
+        self.assertTrue(self.sent[0]["monitored"])
+        self.assertFalse(self.sent[0]["searchOnAdd"])
+
+    def test_refollow_keeps_existing_date(self):
+        put = []
+        self.app.whisparr.routes[("GET", "performer")] = [{"id": 3, "foreignId": SCENE, "monitored": False, "afterDate": "2026-10-30"}]
+        self.app.whisparr.routes[("PUT", "performer/3")] = lambda b, p: put.append(b) or b
+        self.app.whisparr.set_follow("performer", SCENE, True)
+        self.assertEqual((put[0]["afterDate"], put[0]["monitored"]), ("2026-10-30", True))
+
+
+class Images(unittest.TestCase):
+    def test_only_stashdb_hosts(self):
+        ok = d.Images.allowed
+        self.assertTrue(ok("https://stashdb.org/images/x"))
+        self.assertTrue(ok("https://cdn.stashdb.org/images/x"))
+        self.assertFalse(ok("http://stashdb.org/images/x"))
+        self.assertFalse(ok("https://stashdb.org.evil.example/x"))
+        self.assertFalse(ok("https://evilstashdb.org/x"))
+        self.assertFalse(ok("file:///etc/passwd"))
+
+
+class Http(unittest.TestCase):
+    """The real handler on a local port: sign-in, sessions and the request header check."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.app = make_app(self.tmp.name)
+        self.server = d.Server(("127.0.0.1", 0), d.Handler, self.app)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.port = self.server.server_address[1]
+        self.cookie = None
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.tmp.cleanup()
+
+    def req(self, method, path, body=None, header=True):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        headers = {"Content-Type": "application/json"}
+        if header:
+            headers["X-Requested-With"] = "desireerr"
+        if self.cookie:
+            headers["Cookie"] = self.cookie
+        conn.request(method, path, json.dumps(body) if body is not None else None, headers)
+        resp = conn.getresponse()
+        data = resp.read()
+        if resp.getheader("Set-Cookie"):
+            self.cookie = resp.getheader("Set-Cookie").split(";")[0]
+        conn.close()
+        return resp.status, (json.loads(data) if data and resp.getheader("Content-Type", "").startswith("application/json") else data)
+
+    def test_setup_once_then_login(self):
+        self.assertTrue(self.req("GET", "/api/status")[1]["setup_needed"])
+        self.assertEqual(self.req("GET", "/api/requests")[0], 401)
+        status, _ = self.req("POST", "/api/setup", {"username": "boss", "password": "password1", "setup_code": self.app.setup_code})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.req("GET", "/api/status")[1]["user"]["username"], "boss")
+        self.assertEqual(self.req("GET", "/api/requests")[0], 200)
+        self.assertEqual(self.req("POST", "/api/setup", {"username": "x2", "password": "password1"})[0], 409)
+        self.req("POST", "/api/logout")
+        self.assertEqual(self.req("GET", "/api/requests")[0], 401)
+        self.assertEqual(self.req("POST", "/api/login", {"username": "boss", "password": "nope"})[0], 401)
+        self.assertEqual(self.req("POST", "/api/login", {"username": "BOSS", "password": "password1"})[0], 200)
+
+    def test_setup_needs_the_code(self):
+        self.assertEqual(len(self.app.setup_code), 8)
+        status, body = self.req("POST", "/api/setup", {"username": "boss", "password": "password1", "setup_code": "nope"})
+        self.assertEqual(status, 403)
+        self.assertTrue(self.req("GET", "/api/status")[1]["setup_needed"])
+        self.assertEqual(self.req("POST", "/api/setup", {"username": "boss", "password": "password1",
+                                                         "setup_code": self.app.setup_code.upper()})[0], 200)
+        self.assertFalse((self.app.data_dir / "setup-code").exists())
+
+    def test_writes_need_the_header(self):
+        self.assertEqual(self.req("POST", "/api/setup", {"username": "boss", "password": "password1", "setup_code": self.app.setup_code}, header=False)[0], 403)
+
+    def test_images_need_a_session(self):
+        self.assertEqual(self.req("GET", "/img?u=https%3A%2F%2Fstashdb.org%2Fimages%2Fx")[0], 401)
+
+    def test_pages_and_static_files(self):
+        status, page = self.req("GET", "/scene/whatever")
+        self.assertEqual(status, 200)
+        self.assertIn(b"<title>Desireerr</title>", page)
+        self.assertEqual(self.req("GET", "/static/app.js")[0], 200)
+        self.assertEqual(self.req("GET", "/static/../desireerr.py")[0], 404)
+
+    def test_users_cannot_reach_admin_routes(self):
+        self.req("POST", "/api/setup", {"username": "boss", "password": "password1", "setup_code": self.app.setup_code})
+        self.assertEqual(self.req("POST", "/api/users", {"username": "guest", "password": "password1"})[0], 200)
+        self.req("POST", "/api/logout")
+        self.req("POST", "/api/login", {"username": "guest", "password": "password1"})
+        self.assertEqual(self.req("GET", "/api/settings")[0], 403)
+        self.assertEqual(self.req("POST", "/api/follow", {"kind": "performer", "id": SCENE, "follow": True})[0], 403)
+
+
+if __name__ == "__main__":
+    unittest.main()
