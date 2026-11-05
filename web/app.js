@@ -774,6 +774,7 @@ async function viewPerformer(view, id, ctx) {
   document.title = p.name;
   const im = pickImage(p.images, false);
   const back = pickImage(p.images, true);
+  const meas = [p.band_size && p.cup_size ? `${p.band_size}${p.cup_size}` : p.cup_size, p.waist_size, p.hip_size].filter(Boolean).join("-");
   const mods = (list) => (list || []).map((m) => [m.location, m.description].filter(Boolean).join(": ")).join(", ");
   const facts = [
     ["Aliases", (p.aliases || []).join(", ")],
@@ -783,6 +784,8 @@ async function viewPerformer(view, id, ctx) {
     ["Hair", titleCase(p.hair_color)],
     ["Eyes", titleCase(p.eye_color)],
     ["Height", p.height ? `${p.height} cm` : ""],
+    ["Measurements", meas],
+    ["Breasts", titleCase(p.breast_type)],
     ["Career", p.career_start_year ? `${p.career_start_year} to ${p.career_end_year || "now"}` : ""],
     ["Tattoos", mods(p.tattoos)],
     ["Piercings", mods(p.piercings)],

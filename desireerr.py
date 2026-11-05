@@ -201,7 +201,7 @@ PERFORMER_FULL = PERFORMER_CARD + """
 fragment PerformerFull on Performer {
   ...PerformerCard
   aliases birth_date age country ethnicity hair_color eye_color height
-  career_start_year career_end_year
+  cup_size band_size waist_size hip_size breast_type career_start_year career_end_year
   urls { url site { name } }
   tattoos { location description }
   piercings { location description }
