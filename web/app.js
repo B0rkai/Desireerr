@@ -355,13 +355,15 @@ function sceneCard(s) {
   return html`<a class="card scene-card" href="/scene/${s.id}" data-scene="${s.id}">
     <div class="thumb">
       ${im ? html`<img src="${imgUrl(im, 600)}" alt="" loading="lazy" decoding="async">` : noImg()}
-      <div class="shade"></div>
       ${s.duration ? html`<span class="dur">${fmtDur(s.duration)}</span>` : ""}
       <div class="quick">${sceneQuick(s)}</div>
-      <div class="over"><div class="title">${s.title || "Untitled"}</div><div class="meta">${meta}</div></div>
       ${progressBar(s.state)}
     </div>
-    ${people ? html`<div class="people-line">${people}</div>` : ""}
+    <div class="body">
+      <div class="title">${s.title || "Untitled"}</div>
+      <div class="meta">${meta}</div>
+      ${people ? html`<div class="people-line">${people}</div>` : ""}
+    </div>
   </a>`;
 }
 
