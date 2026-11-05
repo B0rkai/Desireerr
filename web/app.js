@@ -131,6 +131,8 @@ const ICONS = {
   external: '<path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
   chevron: '<path d="m9 6 6 6-6 6"/>',
   chevronLeft: '<path d="m15 6-6 6 6 6"/>',
+  zoomIn: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5M11 8v6M8 11h6"/>',
+  zoomOut: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5M8 11h6"/>',
   photos: '<rect x="3" y="6" width="14" height="14" rx="2"/><path d="M7 3h12a2 2 0 0 1 2 2v12"/><path d="m3 16 4-4 4 4 2-2 4 4"/>',
   menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
@@ -679,6 +681,8 @@ function lightbox(images, start = 0, title = "") {
   closeLightbox();
   let i = Math.max(0, start);
   const many = images.length > 1;
+  // Actual size, and moving around in it, is for a mouse; on touch screens pictures just fit.
+  const mouse = matchMedia("(hover: hover) and (pointer: fine)").matches;
   const back = document.activeElement;
   const el = document.createElement("div");
   el.className = "lightbox loading";
@@ -687,47 +691,129 @@ function lightbox(images, start = 0, title = "") {
   el.setAttribute("aria-label", title ? `Photos of ${title}` : "Photos");
   el.innerHTML = html`
     <button type="button" class="iconbtn lb-close" aria-label="Close">${icon("x")}</button>
+    ${mouse ? html`<button type="button" class="iconbtn lb-zoom" aria-label="Actual size" title="Actual size" hidden>${icon("zoomIn")}</button>` : ""}
     ${many ? html`<button type="button" class="iconbtn lb-nav lb-prev" aria-label="Previous photo">${icon("chevronLeft")}</button>` : ""}
     <figure class="lb-stage"><img alt="" draggable="false"><div class="spinner"></div></figure>
     ${many ? html`<button type="button" class="iconbtn lb-nav lb-next" aria-label="Next photo">${icon("chevron")}</button>` : ""}
     <div class="lb-count" aria-live="polite"></div>`.s;
-  const img = $("img", el), count = $(".lb-count", el);
+  const img = $("img", el), stage = $(".lb-stage", el), count = $(".lb-count", el), zoomBtn = $(".lb-zoom", el);
+  let zoomed = false, x = 0, y = 0;
+
+  // Zoomed: the picture at its own size, moved so it covers the stage where it's big enough.
+  const place = () => {
+    const w = stage.clientWidth, h = stage.clientHeight, W = img.naturalWidth, H = img.naturalHeight;
+    x = W <= w ? (w - W) / 2 : Math.min(0, Math.max(w - W, x));
+    y = H <= h ? (h - H) / 2 : Math.min(0, Math.max(h - H, y));
+    img.style.transform = `translate(${x}px, ${y}px)`;
+  };
+  // Fitted: offer actual size only when the picture had to be shrunk to fit.
+  const updateZoomable = () => {
+    if (zoomed) return;
+    const ok = mouse && img.naturalWidth > 0 &&
+      (img.naturalWidth > img.clientWidth + 1 || img.naturalHeight > img.clientHeight + 1);
+    el.classList.toggle("can-zoom", ok);
+    if (zoomBtn) zoomBtn.hidden = !ok;
+  };
+  const zoom = (on, cx, cy) => {
+    if (on === zoomed) return;
+    if (on) {
+      // Keep the point under the cursor (or the middle) where it is.
+      const r = img.getBoundingClientRect();
+      cx ??= r.left + r.width / 2;
+      cy ??= r.top + r.height / 2;
+      const fx = (cx - r.left) / r.width, fy = (cy - r.top) / r.height;
+      zoomed = true;
+      el.classList.add("zoomed");
+      const s = stage.getBoundingClientRect();
+      x = cx - s.left - fx * img.naturalWidth;
+      y = cy - s.top - fy * img.naturalHeight;
+      place();
+    } else {
+      zoomed = false;
+      el.classList.remove("zoomed");
+      img.style.transform = "";
+      updateZoomable();
+    }
+    if (zoomBtn) {
+      zoomBtn.innerHTML = icon(zoomed ? "zoomOut" : "zoomIn").s;
+      zoomBtn.title = zoomed ? "Fit to screen" : "Actual size";
+      zoomBtn.setAttribute("aria-label", zoomBtn.title);
+    }
+  };
   const show = (n) => {
+    zoom(false);
     i = (n + images.length) % images.length;
     el.classList.add("loading");
-    img.onload = img.onerror = () => el.classList.remove("loading");
+    el.classList.remove("can-zoom");
+    if (zoomBtn) zoomBtn.hidden = true;
+    img.onload = () => { el.classList.remove("loading"); updateZoomable(); };
+    img.onerror = () => el.classList.remove("loading");
     img.src = imgUrl(images[i].url);
     count.textContent = many ? `${i + 1} / ${images.length}` : "";
     if (many) for (const d of [1, -1]) new Image().src = imgUrl(images[(i + d + images.length) % images.length].url);
   };
   const onKey = (e) => {
-    if (e.key === "Escape") closeLightbox();
+    if (e.key === "Escape") { if (zoomed) zoom(false); else closeLightbox(); }
     else if (many && e.key === "ArrowRight") show(i + 1);
     else if (many && e.key === "ArrowLeft") show(i - 1);
   };
+  const onResize = () => (zoomed ? place() : updateZoomable());
   el._close = () => {
     document.removeEventListener("keydown", onKey);
+    window.removeEventListener("resize", onResize);
     document.body.classList.remove("lb-open");
     el.remove();
     back?.focus?.();
   };
-  // A swipe pages; a tap outside the picture closes. (A swipe also ends in a click: ignore it.)
-  let x0 = null, swiped = false;
-  el.addEventListener("pointerdown", (e) => { x0 = e.clientX; swiped = false; });
-  el.addEventListener("pointerup", (e) => {
-    if (x0 === null) return;
-    const dx = e.clientX - x0;
-    x0 = null;
-    if (many && Math.abs(dx) > 50) { swiped = true; show(i + (dx < 0 ? 1 : -1)); }
+
+  // On the picture: drag to move around when zoomed; otherwise a swipe pages. A tap outside
+  // the picture closes, a click on it zooms or (zoomed, without dragging) fits it again.
+  // A drag also ends in a click, which is then ignored.
+  let drag = null, swallow = false;
+  stage.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    drag = { x0: e.clientX, y0: e.clientY, x, y, moved: false };
+    if (zoomed) {
+      e.preventDefault();
+      stage.setPointerCapture(e.pointerId);
+      stage.classList.add("dragging");
+    }
   });
+  stage.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x0, dy = e.clientY - drag.y0;
+    if (Math.abs(dx) + Math.abs(dy) > 4) drag.moved = true;
+    if (zoomed) { x = drag.x + dx; y = drag.y + dy; place(); }
+  });
+  const endDrag = (e) => {
+    if (!drag) return;
+    const d = drag;
+    drag = null;
+    stage.classList.remove("dragging");
+    if (zoomed) { swallow = true; if (!d.moved) zoom(false); return; }
+    const dx = e.clientX - d.x0;
+    if (many && Math.abs(dx) > 50) { swallow = true; show(i + (dx < 0 ? 1 : -1)); }
+  };
+  stage.addEventListener("pointerup", endDrag);
+  stage.addEventListener("pointercancel", () => { drag = null; stage.classList.remove("dragging"); });
+  el.addEventListener("wheel", (e) => {
+    if (!zoomed) return;
+    e.preventDefault();
+    x -= e.shiftKey && !e.deltaX ? e.deltaY : e.deltaX;
+    y -= e.shiftKey && !e.deltaX ? 0 : e.deltaY;
+    place();
+  }, { passive: false });
   el.addEventListener("click", (e) => {
-    if (swiped) { swiped = false; return; }
+    if (swallow) { swallow = false; return; }
     if (e.target.closest(".lb-close")) closeLightbox();
+    else if (e.target.closest(".lb-zoom")) zoom(!zoomed);
     else if (e.target.closest(".lb-prev")) show(i - 1);
     else if (e.target.closest(".lb-next")) show(i + 1);
-    else if (e.target === el || e.target.classList.contains("lb-stage")) closeLightbox();
+    else if (e.target === img) { if (el.classList.contains("can-zoom")) zoom(true, e.clientX, e.clientY); }
+    else if (e.target === el || e.target === stage) closeLightbox();
   });
   document.addEventListener("keydown", onKey);
+  window.addEventListener("resize", onResize);
   document.body.classList.add("lb-open");
   document.body.append(el);
   $(".lb-close", el).focus();

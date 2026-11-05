@@ -296,8 +296,17 @@ button.hero-poster { border: 0; padding: 0; width: 100%; display: block; }
 
 .lightbox { position: fixed; inset: 0; z-index: 70; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; background: rgba(8, 7, 10, .95); touch-action: pinch-zoom; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); animation: lb-in .15s ease; }
 @keyframes lb-in { from { opacity: 0; } }
-.lb-stage { grid-column: 2; margin: 0; height: 100vh; height: 100dvh; display: grid; place-items: center; position: relative; padding: 60px 8px; min-width: 0; }
-.lb-stage img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 8px; box-shadow: 0 24px 70px rgba(0,0,0,.7); user-select: none; -webkit-user-select: none; transition: opacity .15s; }
+/* Fitted: never past the window, never blown up; the stage's padding keeps the buttons clear. */
+.lightbox { --lb-pad-y: 60px; --lb-pad-x: 8px; --lb-h: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom)); }
+.lb-stage { grid-column: 2; grid-row: 1; margin: 0; height: var(--lb-h); display: grid; place-items: center; position: relative; overflow: hidden; padding: var(--lb-pad-y) var(--lb-pad-x); min-width: 0; touch-action: pinch-zoom; }
+.lb-stage img { display: block; max-width: 100%; max-height: calc(var(--lb-h) - 2 * var(--lb-pad-y)); width: auto; height: auto; border-radius: 8px; box-shadow: 0 24px 70px rgba(0,0,0,.7); user-select: none; -webkit-user-select: none; transition: opacity .15s; }
+.lightbox.can-zoom .lb-stage img { cursor: zoom-in; }
+/* Zoomed: actual size over the whole window, moved by dragging or the wheel. */
+.lightbox.zoomed .lb-stage { grid-column: 1 / -1; display: block; padding: 0; cursor: grab; touch-action: none; }
+.lightbox.zoomed .lb-stage.dragging { cursor: grabbing; }
+.lightbox.zoomed .lb-stage img { position: absolute; left: 0; top: 0; max-width: none; max-height: none; border-radius: 0; box-shadow: none; cursor: inherit; transition: none; }
+.lightbox.zoomed .lb-stage .spinner { display: none; }
+.lb-zoom { position: absolute; z-index: 2; top: calc(14px + env(safe-area-inset-top)); right: calc(66px + env(safe-area-inset-right)); }
 .lb-stage .spinner { position: absolute; display: none; }
 .lightbox.loading .lb-stage img { opacity: .35; }
 .lightbox.loading .lb-stage .spinner { display: block; }
@@ -313,7 +322,8 @@ button.hero-poster { border: 0; padding: 0; width: 100%; display: block; }
 body.lb-open { overflow: hidden; }
 @media (max-width: 700px) {
   .lightbox { grid-template-columns: minmax(0, 1fr); }
-  .lb-stage { grid-column: 1; grid-row: 1; padding: 64px 4px 76px; }
+  .lightbox { --lb-pad-y: 70px; --lb-pad-x: 4px; }
+  .lb-stage { grid-column: 1; grid-row: 1; }
   .lb-nav { position: absolute; bottom: calc(10px + env(safe-area-inset-bottom)); margin: 0; width: 46px; height: 46px; }
   .lb-prev { left: calc(14px + env(safe-area-inset-left)); }
   .lb-next { right: calc(14px + env(safe-area-inset-right)); }
