@@ -70,7 +70,14 @@ function toast(msg, bad = false) {
   setTimeout(() => t.remove(), bad ? 7000 : 3500);
 }
 
-const imgUrl = (u) => "/img?u=" + encodeURIComponent(u);
+// StashDB scales its images with ?size=N (the longer side), so cards fetch small copies and
+// only the hero and the photo viewer the full image.
+const imgUrl = (u, size) => "/img?u=" + encodeURIComponent(size && !u.includes("?") ? `${u}?size=${size}` : u);
+// Should an image not come in a smaller size, ask for the full one.
+document.addEventListener("error", (e) => {
+  const el = e.target;
+  if (el.tagName === "IMG" && /%3Fsize%3D\d+/.test(el.src)) el.src = el.src.replace(/%3Fsize%3D\d+/, "");
+}, true);
 function pickImage(images, landscape = true) {
   if (!images || !images.length) return "";
   const score = (i) => [((i.width || 0) >= (i.height || 0)) === landscape ? 1 : 0, (i.width || 0) * (i.height || 0)];
@@ -123,6 +130,8 @@ const ICONS = {
   heartFill: '<path fill="currentColor" stroke="none" d="M12 20.5C6 16.8 3 13.3 3 9.6 3 6.9 5.1 5 7.6 5c1.9 0 3.4 1 4.4 2.6C13 6 14.5 5 16.4 5 18.9 5 21 6.9 21 9.6c0 3.7-3 7.2-9 10.9z"/>',
   external: '<path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
   chevron: '<path d="m9 6 6 6-6 6"/>',
+  chevronLeft: '<path d="m15 6-6 6 6 6"/>',
+  photos: '<rect x="3" y="6" width="14" height="14" rx="2"/><path d="M7 3h12a2 2 0 0 1 2 2v12"/><path d="m3 16 4-4 4 4 2-2 4 4"/>',
   menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   bell: '<path d="M6 16v-5a6 6 0 1 1 12 0v5l1.5 2h-15zM10 20.5a2.2 2.2 0 0 0 4 0"/>',
@@ -268,6 +277,7 @@ function shell() {
 }
 
 async function render() {
+  closeLightbox();
   const token = ++viewToken;
   const path = location.pathname;
   if (!status.user && !["/login", "/setup"].includes(path)) {
@@ -337,7 +347,7 @@ function sceneCard(s) {
   const meta = [s.studio?.name, fmtDate(s.release_date)].filter(Boolean).join(" · ");
   return html`<a class="card scene-card" href="/scene/${s.id}" data-scene="${s.id}">
     <div class="thumb">
-      ${im ? html`<img src="${imgUrl(im)}" alt="" loading="lazy" decoding="async">` : noImg()}
+      ${im ? html`<img src="${imgUrl(im, 640)}" alt="" loading="lazy" decoding="async">` : noImg()}
       <div class="shade"></div>
       ${s.duration ? html`<span class="dur">${fmtDur(s.duration)}</span>` : ""}
       <div class="quick">${sceneQuick(s)}</div>
@@ -351,7 +361,7 @@ function sceneCard(s) {
 function personCard(p) {
   const im = pickImage(p.images, false) || p.image;
   return html`<a class="card person-card" href="/performer/${p.id}">
-    <div class="thumb">${im ? html`<img src="${imgUrl(im)}" alt="" loading="lazy" decoding="async">` : noImg("users")}</div>
+    <div class="thumb">${im ? html`<img src="${imgUrl(im, 400)}" alt="" loading="lazy" decoding="async">` : noImg("users")}</div>
     ${p.is_favorite || p.followed ? html`<span class="fav" title="${p.followed ? "Followed" : "StashDB favourite"}">${icon("heartFill")}</span>` : ""}
     <div class="name">${p.name}${p.disambiguation ? html`<small>${p.disambiguation}</small>` : p.scene_count ? html`<small>${p.scene_count} scenes</small>` : ""}</div>
   </a>`;
@@ -379,8 +389,8 @@ function requestRow(r, { compact = false } = {}) {
     acts.push(html`<button class="btn small ghost" data-act="cancel" data-rid="${r.id}">Remove</button>`);
   }
   return html`<div class="req" data-request="${r.id}">
-    ${r.image ? html`<div class="bg"><img src="${imgUrl(r.image)}" alt="" loading="lazy"></div>` : ""}
-    <a class="thumb" href="/scene/${r.scene_id}">${r.image ? html`<img src="${imgUrl(r.image)}" alt="" loading="lazy">` : noImg()}${progressBar(st)}</a>
+    ${r.image ? html`<div class="bg"><img src="${imgUrl(r.image, 400)}" alt="" loading="lazy"></div>` : ""}
+    <a class="thumb" href="/scene/${r.scene_id}">${r.image ? html`<img src="${imgUrl(r.image, 400)}" alt="" loading="lazy">` : noImg()}${progressBar(st)}</a>
     <div class="info">
       <a class="t" href="/scene/${r.scene_id}">${r.title || "Untitled"}</a>
       <div class="m">${[r.studio, fmtDate(r.release_date)].filter(Boolean).join(" · ")}</div>
@@ -655,6 +665,74 @@ async function sceneBrowser(el, ctx, { fixed = {}, defaults = {}, hide = [] } = 
 }
 
 // ---------------------------------------------------------------------------------------
+// Photo viewer: full-size pictures, paged with the arrows, the keyboard or a swipe
+// ---------------------------------------------------------------------------------------
+
+function lightbox(images, start = 0, title = "") {
+  if (!images?.length) return;
+  closeLightbox();
+  let i = Math.max(0, start);
+  const many = images.length > 1;
+  const back = document.activeElement;
+  const el = document.createElement("div");
+  el.className = "lightbox loading";
+  el.setAttribute("role", "dialog");
+  el.setAttribute("aria-modal", "true");
+  el.setAttribute("aria-label", title ? `Photos of ${title}` : "Photos");
+  el.innerHTML = html`
+    <button type="button" class="iconbtn lb-close" aria-label="Close">${icon("x")}</button>
+    ${many ? html`<button type="button" class="iconbtn lb-nav lb-prev" aria-label="Previous photo">${icon("chevronLeft")}</button>` : ""}
+    <figure class="lb-stage"><img alt="" draggable="false"><div class="spinner"></div></figure>
+    ${many ? html`<button type="button" class="iconbtn lb-nav lb-next" aria-label="Next photo">${icon("chevron")}</button>` : ""}
+    <div class="lb-count" aria-live="polite"></div>`.s;
+  const img = $("img", el), count = $(".lb-count", el);
+  const show = (n) => {
+    i = (n + images.length) % images.length;
+    el.classList.add("loading");
+    img.onload = img.onerror = () => el.classList.remove("loading");
+    img.src = imgUrl(images[i].url);
+    count.textContent = many ? `${i + 1} / ${images.length}` : "";
+    if (many) for (const d of [1, -1]) new Image().src = imgUrl(images[(i + d + images.length) % images.length].url);
+  };
+  const onKey = (e) => {
+    if (e.key === "Escape") closeLightbox();
+    else if (many && e.key === "ArrowRight") show(i + 1);
+    else if (many && e.key === "ArrowLeft") show(i - 1);
+  };
+  el._close = () => {
+    document.removeEventListener("keydown", onKey);
+    document.body.classList.remove("lb-open");
+    el.remove();
+    back?.focus?.();
+  };
+  // A swipe pages; a tap outside the picture closes. (A swipe also ends in a click: ignore it.)
+  let x0 = null, swiped = false;
+  el.addEventListener("pointerdown", (e) => { x0 = e.clientX; swiped = false; });
+  el.addEventListener("pointerup", (e) => {
+    if (x0 === null) return;
+    const dx = e.clientX - x0;
+    x0 = null;
+    if (many && Math.abs(dx) > 50) { swiped = true; show(i + (dx < 0 ? 1 : -1)); }
+  });
+  el.addEventListener("click", (e) => {
+    if (swiped) { swiped = false; return; }
+    if (e.target.closest(".lb-close")) closeLightbox();
+    else if (e.target.closest(".lb-prev")) show(i - 1);
+    else if (e.target.closest(".lb-next")) show(i + 1);
+    else if (e.target === el || e.target.classList.contains("lb-stage")) closeLightbox();
+  });
+  document.addEventListener("keydown", onKey);
+  document.body.classList.add("lb-open");
+  document.body.append(el);
+  $(".lb-close", el).focus();
+  show(i);
+}
+
+function closeLightbox() {
+  $(".lightbox")?._close();
+}
+
+// ---------------------------------------------------------------------------------------
 // Views
 // ---------------------------------------------------------------------------------------
 
@@ -728,9 +806,11 @@ async function viewScene(view, id, ctx) {
   ].filter(([, v]) => v);
   view.innerHTML = html`<div class="page flush">
     <section class="hero">
-      <div class="backdrop">${im ? html`<img src="${imgUrl(im)}" alt="">` : ""}</div>
+      <div class="backdrop">${im ? html`<img src="${imgUrl(im, 1280)}" alt="">` : ""}</div>
       <div class="hero-body">
-        <div class="hero-poster">${im ? html`<img src="${imgUrl(im)}" alt="">` : noImg()}</div>
+        ${im ? html`<button type="button" class="hero-poster zoomable" data-photo="${s.images.findIndex((x) => x.url === im)}" aria-label="Show the pictures">
+          <img src="${imgUrl(im, 1280)}" alt="">${s.images.length > 1 ? html`<span class="photo-count">${icon("photos")}${s.images.length}</span>` : ""}</button>`
+        : html`<div class="hero-poster">${noImg()}</div>`}
         <div class="hero-info">
           <div class="kicker">${s.studio ? html`<a href="/studio/${s.studio.id}">${s.studio.name}</a>` : ""}${s.studio?.parent ? html`<span style="color:var(--muted)">· ${s.studio.parent.name}</span>` : ""}</div>
           <h1>${s.title || "Untitled"}</h1>
@@ -748,7 +828,7 @@ async function viewScene(view, id, ctx) {
         ${s.performers?.length ? html`<section class="section"><div class="section-head"><h2>Performers</h2></div>
           <div class="cast">${s.performers.map((p) => {
             const pim = pickImage(p.performer.images, false);
-            return html`<a href="/performer/${p.performer.id}"><div class="face">${pim ? html`<img src="${imgUrl(pim)}" alt="" loading="lazy">` : ""}</div><span>${performerName(p)}${p.as && p.as !== p.performer.name ? html`<small>${p.performer.name}</small>` : p.performer.disambiguation ? html`<small>${p.performer.disambiguation}</small>` : ""}</span></a>`;
+            return html`<a href="/performer/${p.performer.id}"><div class="face">${pim ? html`<img src="${imgUrl(pim, 240)}" alt="" loading="lazy">` : ""}</div><span>${performerName(p)}${p.as && p.as !== p.performer.name ? html`<small>${p.performer.name}</small>` : p.performer.disambiguation ? html`<small>${p.performer.disambiguation}</small>` : ""}</span></a>`;
           })}</div></section>` : ""}
         ${s.details ? html`<section class="section"><div class="section-head"><h2>About</h2></div><p class="prose">${s.details}</p></section>` : ""}
         ${s.tags?.length ? html`<section class="section"><div class="section-head"><h2>Tags</h2>${similar.length ? html`<a class="more" href="/scenes${qs({ tags: similar, sort: "POPULARITY" })}">More like this${icon("chevron")}</a>` : ""}</div>
@@ -757,6 +837,7 @@ async function viewScene(view, id, ctx) {
       <aside class="facts-card"><dl>${facts.map(([k, v]) => html`<div><dt>${k}</dt><dd>${v}</dd></div>`)}</dl></aside>
     </div>
   </div>`.s;
+  view.addEventListener("click", (e) => { const b = e.target.closest("[data-photo]"); if (b) lightbox(s.images, +b.dataset.photo, s.title); });
 }
 
 function followButton(kind, item) {
@@ -790,11 +871,14 @@ async function viewPerformer(view, id, ctx) {
     ["Tattoos", mods(p.tattoos)],
     ["Piercings", mods(p.piercings)],
   ].filter(([, v]) => v && String(v).trim());
+  const photos = p.images || [];
   view.innerHTML = html`<div class="page flush">
     <section class="hero person">
-      <div class="backdrop">${back && back !== im ? html`<img src="${imgUrl(back)}" alt="">` : ""}</div>
+      <div class="backdrop">${back && back !== im ? html`<img src="${imgUrl(back, 1280)}" alt="">` : ""}</div>
       <div class="hero-body">
-        <div class="hero-poster portrait">${im ? html`<img src="${imgUrl(im)}" alt="">` : noImg("users")}</div>
+        ${im ? html`<button type="button" class="hero-poster portrait zoomable" data-photo="${photos.findIndex((x) => x.url === im)}" aria-label="Show the photos">
+          <img src="${imgUrl(im, 800)}" alt="">${photos.length > 1 ? html`<span class="photo-count">${icon("photos")}${photos.length}</span>` : ""}</button>`
+        : html`<div class="hero-poster portrait">${noImg("users")}</div>`}
         <div class="hero-info">
           <div class="kicker">${[titleCase(p.gender), p.country].filter(Boolean).join(" · ")}${p.is_favorite ? html`<span title="StashDB favourite">${icon("heartFill")}</span>` : ""}</div>
           <h1>${p.name}</h1>
@@ -804,11 +888,16 @@ async function viewPerformer(view, id, ctx) {
         </div>
       </div>
     </section>
+    ${photos.length > 1 ? html`<section class="section">
+      <div class="section-head"><h2>Photos</h2><span class="note">${photos.length}</span></div>
+      <div class="slider gallery">${photos.map((ph, i) => html`<button type="button" class="card thumb-btn" data-photo="${i}" aria-label="Photo ${i + 1} of ${photos.length}"><div class="thumb"><img src="${imgUrl(ph.url, 360)}" alt="" loading="lazy" decoding="async"></div></button>`)}</div>
+    </section>` : ""}
     <div class="detail-grid">
       <div class="section"><div class="section-head"><h2>Scenes</h2></div><div class="section" id="browser"></div></div>
       ${facts.length ? html`<aside class="facts-card"><dl>${facts.map(([k, v]) => html`<div><dt>${k}</dt><dd>${v}</dd></div>`)}</dl></aside>` : ""}
     </div>
   </div>`.s;
+  view.addEventListener("click", (e) => { const b = e.target.closest("[data-photo]"); if (b) lightbox(photos, +b.dataset.photo, p.name); });
   await sceneBrowser($("#browser", view), ctx, { fixed: { performers: [id] } });
 }
 
