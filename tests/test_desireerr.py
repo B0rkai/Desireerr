@@ -333,6 +333,48 @@ class Init(unittest.TestCase):
         self.assertIn("no StashDB key yet", printed)
 
 
+class Favourites(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.favs, self.posted = [], []
+        self.app = make_app(self.tmp.name, {
+            ("GET", "performer"): lambda b, p: [],
+            ("GET", "lookup/performer"): [{"foreignId": SCENE, "performer": {"foreignId": SCENE, "name": "P"}}],
+            ("POST", "performer"): lambda b, p: self.posted.append(b) or b,
+            ("GET", "qualityprofile"): [{"id": 1, "name": "Any"}],
+            ("GET", "rootfolder"): [{"path": "/x/HD"}],
+            ("GET", "studio"): [],
+        })
+        self.app.whisparr.refresh_followed = lambda: None
+        self.app.stash.set_favorite = lambda kind, sid, fav: self.favs.append((kind, sid, fav))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_new_favourite_is_followed_from_today(self):
+        out = self.app.set_favorite("performer", SCENE, True)
+        self.assertEqual(self.favs, [("performer", SCENE, True)])
+        self.assertTrue(out["is_favorite"])
+        self.assertEqual((self.posted[0]["afterDate"], self.posted[0]["monitored"]), (d.today(), True))
+
+    def test_already_followed_is_left_alone(self):
+        self.app.whisparr.routes[("GET", "performer")] = [{"id": 3, "foreignId": SCENE, "monitored": True,
+                                                           "afterDate": "2026-10-30"}]
+        out = self.app.set_favorite("performer", SCENE, True)
+        self.assertEqual(out["follow"], {"followed": True, "since": "2026-10-30"})
+        self.assertEqual(self.posted, [])
+
+    def test_unfavourite_leaves_whisparr(self):
+        self.app.set_favorite("performer", SCENE, False)
+        self.assertEqual(self.favs, [("performer", SCENE, False)])
+        self.assertEqual(self.app.whisparr.calls, [])
+
+    def test_whisparr_trouble_does_not_undo_the_favourite(self):
+        self.app.whisparr.routes[("GET", "performer")] = lambda b, p: (_ for _ in ()).throw(d.ApiError(502, "down"))
+        out = self.app.set_favorite("performer", SCENE, True)
+        self.assertEqual((out["is_favorite"], out["follow_error"]), (True, "down"))
+
+
 class Images(unittest.TestCase):
     def test_only_stashdb_hosts(self):
         ok = d.Images.allowed
@@ -417,6 +459,7 @@ class Http(unittest.TestCase):
         self.req("POST", "/api/login", {"username": "guest", "password": "password1"})
         self.assertEqual(self.req("GET", "/api/settings")[0], 403)
         self.assertEqual(self.req("POST", "/api/follow", {"kind": "performer", "id": SCENE, "follow": True})[0], 403)
+        self.assertEqual(self.req("POST", "/api/favorite", {"kind": "performer", "id": SCENE, "favorite": True})[0], 403)
 
 
 if __name__ == "__main__":

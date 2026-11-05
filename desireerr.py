@@ -373,6 +373,14 @@ query ($input: TagQueryInput!) {
     def me(self, key=None):
         return self.query("{ me { name } }", ttl=0, key=key)["me"]
 
+    def set_favorite(self, kind, sid, favorite):
+        """Favourite (or not) a performer or studio on the key owner's StashDB account."""
+        field = {"performer": "favoritePerformer", "studio": "favoriteStudio"}[kind]
+        q = f"mutation ($id: ID!, $fav: Boolean!) {{ {field}(id: $id, favorite: $fav) }}"
+        self.query(q, {"id": sid, "fav": bool(favorite)}, ttl=0)
+        with self.lock:
+            self.cache.clear()   # pages and lists show is_favorite
+
 
 # ---------------------------------------------------------------------------------------
 # Whisparr v3
@@ -1086,6 +1094,22 @@ class App:
         self.annotate(found["scenes"])
         return found
 
+    def set_favorite(self, kind, sid, favorite):
+        """Favourite on StashDB; a new favourite is also followed in Whisparr from today on.
+
+        Whisparr's StashDB import list adds favourites by itself, and with no "after" date it
+        would want their whole back catalogue; followed first (after date today), only new
+        scenes are wanted. Unfavouring leaves the follow as it is (Unfollow does that)."""
+        self.stash.set_favorite(kind, sid, favorite)
+        out = {"is_favorite": bool(favorite)}
+        if favorite:
+            try:
+                state = self.whisparr.follow_state(kind, sid)
+                out["follow"] = state if state["followed"] else self.whisparr.set_follow(kind, sid, True)
+            except ApiError as e:
+                out["follow_error"] = e.message
+        return out
+
     # -- settings -----------------------------------------------------------------------
     def public_settings(self):
         s = self.db.settings()
@@ -1356,6 +1380,16 @@ class Handler(BaseHTTPRequestHandler):
             if not tag:
                 raise ApiError(404, "StashDB has no tag with that ID.")
             return 200, tag, None
+
+        # -- favourites (admins: they're the StashDB account's, and Whisparr's StashDB
+        #    import list follows them) --
+        if key == ("POST", "favorite"):
+            admin()
+            body = self.body_json()
+            kind = body.get("kind")
+            if kind not in ("performer", "studio") or not id_list(body.get("id")):
+                raise ApiError(400, "Favourite takes a performer or studio ID.")
+            return 200, app.set_favorite(kind, body["id"], bool(body.get("favorite"))), None
 
         # -- following (admins: it changes what Whisparr wants from now on) --
         if key == ("POST", "follow"):

@@ -188,6 +188,7 @@ h1, h2, h3 { line-height: 1.2; margin: 0; text-wrap: balance; }
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; height: 40px; padding: 0 16px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface-2); color: var(--fg); font-weight: 600; font-size: 14px; cursor: pointer; white-space: nowrap; }
 .btn:hover { background: var(--surface-3); }
 .btn svg { width: 18px; height: 18px; }
+.btn[data-favorite="0"] svg { color: var(--accent-hi); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .btn.primary:hover { background: #be123c; }
 .btn.ok { background: #15803d; border-color: #15803d; color: #fff; }

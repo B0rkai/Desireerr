@@ -435,6 +435,12 @@ document.addEventListener("click", async (e) => {
       await api(`requests/${b.dataset.rid}`, { method: "DELETE" });
       toast("Request removed.");
       afterChange(null, null);
+    } else if (act === "favorite") {
+      const fav = b.dataset.favorite === "1";
+      const r = await api("favorite", { method: "POST", body: { kind: b.dataset.kind, id: b.dataset.id, favorite: fav } });
+      if (r.follow_error) toast(`Favourite saved on StashDB, but Whisparr: ${r.follow_error}`, true);
+      else toast(fav ? "Added to your StashDB favourites. Whisparr follows new scenes from today on." : "Removed from your StashDB favourites.");
+      render();
     } else if (act === "follow") {
       const follow = b.dataset.follow === "1";
       await api("follow", { method: "POST", body: { kind: b.dataset.kind, id: b.dataset.id, follow } });
@@ -840,6 +846,13 @@ async function viewScene(view, id, ctx) {
   view.addEventListener("click", (e) => { const b = e.target.closest("[data-photo]"); if (b) lightbox(s.images, +b.dataset.photo, s.title); });
 }
 
+function favoriteButton(kind, item) {
+  if (!me.is_admin) return "";
+  return item.is_favorite
+    ? html`<button class="btn" data-act="favorite" data-kind="${kind}" data-id="${item.id}" data-favorite="0" title="Remove from your StashDB favourites">${icon("heartFill")}Favourite</button>`
+    : html`<button class="btn" data-act="favorite" data-kind="${kind}" data-id="${item.id}" data-favorite="1" title="Add to your StashDB favourites; Whisparr then follows new scenes from today on">${icon("heart")}Add to favourites</button>`;
+}
+
 function followButton(kind, item) {
   const f = item.follow || {};
   if (f.error) return html`<span class="note bad-text">${f.error}</span>`;
@@ -884,7 +897,7 @@ async function viewPerformer(view, id, ctx) {
           <h1>${p.name}</h1>
           ${p.disambiguation ? html`<div class="facts"><span>${p.disambiguation}</span></div>` : ""}
           <div class="facts"><span>${p.scene_count} scenes on StashDB</span>${p.follow?.followed ? html`<span>Following${p.follow.since ? ` since ${fmtDate(p.follow.since)}` : ""}</span>` : ""}</div>
-          <div class="btns">${followButton("performer", p)}<a class="btn ghost" href="${p.stashdb_url}" target="_blank" rel="noreferrer">${icon("external")}StashDB</a></div>
+          <div class="btns">${followButton("performer", p)}${favoriteButton("performer", p)}<a class="btn ghost" href="${p.stashdb_url}" target="_blank" rel="noreferrer">${icon("external")}StashDB</a></div>
         </div>
       </div>
     </section>
@@ -915,7 +928,7 @@ async function viewStudio(view, id, ctx) {
           <div class="kicker">${s.parent ? html`<a href="/studio/${s.parent.id}">${s.parent.name}</a>` : "Studio"}${s.is_favorite ? html`<span title="StashDB favourite">${icon("heartFill")}</span>` : ""}</div>
           <h1>${s.name}</h1>
           ${s.follow?.followed ? html`<div class="facts"><span>Following${s.follow.since ? ` since ${fmtDate(s.follow.since)}` : ""}</span></div>` : ""}
-          <div class="btns">${followButton("studio", s)}<a class="btn ghost" href="${s.stashdb_url}" target="_blank" rel="noreferrer">${icon("external")}StashDB</a>${site ? html`<a class="btn ghost" href="${site.url}" target="_blank" rel="noreferrer">${icon("external")}Website</a>` : ""}</div>
+          <div class="btns">${followButton("studio", s)}${favoriteButton("studio", s)}<a class="btn ghost" href="${s.stashdb_url}" target="_blank" rel="noreferrer">${icon("external")}StashDB</a>${site ? html`<a class="btn ghost" href="${site.url}" target="_blank" rel="noreferrer">${icon("external")}Website</a>` : ""}</div>
           ${s.child_studios?.length ? html`<div class="chips">${s.child_studios.map((c) => html`<a class="chip" href="/studio/${c.id}">${c.name}</a>`)}</div>` : ""}
         </div>
       </div>
