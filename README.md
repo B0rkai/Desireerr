@@ -9,9 +9,8 @@ or available.
 
 - **One file, standard library only.** `desireerr.py` is the server (Python 3.10+); `web/` is
   a plain JavaScript single-page app with no build step.
-- **Nothing opens without signing in.** Covers are fetched through the server and cached,
-  so nothing loads from StashDB before login, and a "blur covers" button hides them on
-  screen. The browser tab title is a setting, so it can say something neutral.
+- **Everything is behind the login.** Covers are fetched through the server and cached, so
+  the browser only talks to Desireerr. Covers can be blurred, and the tab title is a setting.
 - **Users and approvals.** Admins approve requests, follow performers and studios, and
   change settings. Other users' requests wait for approval unless they're auto-approved.
 
@@ -20,9 +19,9 @@ torrent-box's config on its own.
 
 ## Install
 
-On a torrent-box server, answer yes to Desireerr in `./setup.sh` (it's asked once Whisparr is
-on; or set `[setup] desireerr = yes`). Setup clones this repo to `~/desireerr`, updates it on
-each run and starts it. By hand:
+On a torrent-box server, it comes with Whisparr: answer yes to Whisparr in `./setup.sh` (or
+set `[setup] whisparr = yes`). Setup clones this repo to `~/desireerr`, updates it on each
+run and starts it. By hand:
 
 ```sh
 gh repo clone B0rkai/desireerr ~/desireerr
