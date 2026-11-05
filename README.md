@@ -20,6 +20,10 @@ torrent-box's config on its own.
 
 ## Install
 
+On a torrent-box server, answer yes to Desireerr in `./setup.sh` (it's asked once Whisparr is
+on; or set `[setup] desireerr = yes`). Setup clones this repo to `~/desireerr`, updates it on
+each run and starts it. By hand:
+
 ```sh
 gh repo clone B0rkai/desireerr ~/desireerr
 mkdir -p ~/.config/systemd/user
